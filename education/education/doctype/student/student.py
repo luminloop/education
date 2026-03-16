@@ -117,17 +117,31 @@ class Student(Document):
 		customer = frappe.get_doc("Customer", self.customer)
 		if self.customer_group:
 			customer.customer_group = self.customer_group
-		customer.customer_name = self.student_name
+		# Use student_name if available, otherwise construct from name parts
+		if self.student_name and self.student_name.strip():
+			customer.customer_name = self.student_name
+		else:
+			customer.customer_name = " ".join(
+				filter(None, [self.first_name, self.middle_name, self.last_name])
+			) or "Unknown Student"
 		customer.image = self.image
 		customer.save()
 
 		frappe.msgprint(_("Customer {0} updated").format(customer.name), alert=True)
 
 	def create_customer(self):
+		# Use student_name if available, otherwise construct from name parts
+		if self.student_name and self.student_name.strip():
+			student_name = self.student_name
+		else:
+			student_name = " ".join(
+				filter(None, [self.first_name, self.middle_name, self.last_name])
+			) or "Unknown Student"
+			
 		customer = frappe.get_doc(
 			{
 				"doctype": "Customer",
-				"customer_name": self.student_name,
+				"customer_name": student_name,
 				"customer_group": self.customer_group
 				or frappe.db.get_single_value("Selling Settings", "customer_group"),
 				"customer_type": "Individual",
