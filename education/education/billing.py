@@ -1,7 +1,7 @@
 import frappe
 from frappe import _
 from frappe.utils import validate_phone_number, cint, nowdate
-import razorpay
+from payments.utils import get_payment_gateway_controller, create_payment_gateway
 from erpnext.accounts.doctype.journal_entry.journal_entry import (
 	get_payment_entry_against_invoice,
 )
@@ -15,27 +15,38 @@ def get_details(docname):
 	return details
 
 
-def get_client():
+def get_payment_gateway():
+	"""Get the configured payment gateway from Education Settings"""
 	settings = frappe.get_single("Education Settings")
-	razorpay_key = settings.razorpay_key
-	razorpay_secret = settings.get_password("razorpay_secret", raise_exception=True)
-	if not razorpay_key and not razorpay_secret:
-		frappe.throw(
-			_(
-				"There is a problem with the payment gateway. Please contact the Administrator to proceed."
-			)
-		)
-	return razorpay.Client(auth=(razorpay_key, razorpay_secret))
+	
+	# Check if a specific payment gateway is configured
+	if hasattr(settings, 'payment_gateway') and settings.payment_gateway:
+		return settings.payment_gateway
+	
+	# Fallback to razorpay for backward compatibility
+	return "Razorpay"
 
 
-def create_order(client, amount, currency):
+def get_gateway_client(gateway_name=None):
+	"""Get payment gateway client"""
+	if not gateway_name:
+		gateway_name = get_payment_gateway()
+	
+	# Create payment gateway if it doesn't exist
+	if not frappe.db.exists("Payment Gateway", gateway_name):
+		create_payment_gateway(gateway_name)
+	
+	return get_payment_gateway_controller(gateway_name)
+
+
+def create_order(gateway_name, amount, currency):
+	"""Create payment order using the specified gateway"""
 	try:
-		return client.order.create(
-			{
-				"amount": cint(amount) * 100,
-				"currency": currency,
-			}
-		)
+		client = get_gateway_client(gateway_name)
+		return client.create_order({
+			"amount": cint(amount) * 100,
+			"currency": currency,
+		})
 	except Exception as e:
 		frappe.throw(
 			_(
@@ -50,34 +61,67 @@ def get_payment_options(doctype, docname, phone, currency=None):
 		frappe.throw(_("Invalid document provided."))
 	validate_phone_number(phone_number=phone, throw=True)
 	details = get_details(docname)
-	client = get_client()
-	order = create_order(client, details.outstanding_amount, details.currency)
+	
+	gateway_name = get_payment_gateway()
+	client = get_gateway_client(gateway_name)
+	order = create_order(gateway_name, details.outstanding_amount, details.currency)
+	
+	# Get gateway-specific payment options
 	options = {
-		"key_id": frappe.db.get_single_value("Education Settings", "razorpay_key"),
-		"name": frappe.db.get_single_value("Website Settings", "app_name"),
-		"description": _("Payment for {0} course").format(details["outstanding_amount"]),
-		"order_id": order["id"],
 		"amount": cint(order["amount"]) * 100,
 		"currency": order["currency"],
-		"prefill": {
-			"name": frappe.db.get_value("User", frappe.session.user, "full_name"),
-			"email": frappe.session.user,
-			"contact": phone,
-		},
+		"order_id": order["id"],
 	}
+	
+	# Add gateway-specific fields
+	if hasattr(client, 'get_payment_url'):
+		# For gateways that use redirect-based payment
+		payment_details = {
+			"amount": flt(details.outstanding_amount),
+			"title": _("Payment for {0} course").format(details["outstanding_amount"]),
+			"description": _("Payment for {0} course").format(details["outstanding_amount"]),
+			"reference_doctype": "Sales Invoice",
+			"reference_docname": details["name"],
+			"payer_email": frappe.session.user,
+			"payer_name": frappe.db.get_value("User", frappe.session.user, "full_name"),
+			"currency": details["currency"],
+			"payment_gateway": gateway_name,
+		}
+		
+		if phone:
+			payment_details["contact"] = phone
+			
+		options["payment_url"] = client.get_payment_url(**payment_details)
+	
 	return options
 
 
-def create_razorpay_payment_record(args, status):
+def create_payment_record(args, status, gateway_name=None):
+	"""Create payment record for any gateway"""
+	if not gateway_name:
+		gateway_name = get_payment_gateway()
+		
 	payment_record = frappe.new_doc("Payment Record")
-	payment_record.order_id = args.get("razorpay_order_id", "")
-	payment_record.payment_id = args.get("razorpay_payment_id", "")
-	payment_record.signature = args.get("razorpay_signature", "")
-	payment_record.against_invoice = args.get("name", "")
+	payment_record.gateway = gateway_name
 	payment_record.status = status
 	payment_record.amount = args.get("outstanding_amount", "")
-	if status == "Captured":
-		payment_record.student = args.get("id", "")
+	payment_record.against_invoice = args.get("name", "")
+	
+	# Set gateway-specific fields
+	if gateway_name == "Razorpay":
+		payment_record.order_id = args.get("razorpay_order_id", "")
+		payment_record.payment_id = args.get("razorpay_payment_id", "")
+		payment_record.signature = args.get("razorpay_signature", "")
+	elif gateway_name == "PayPal":
+		payment_record.order_id = args.get("payment_id", "")
+		payment_record.payment_id = args.get("payer_id", "")
+	elif gateway_name == "Stripe":
+		payment_record.payment_id = args.get("payment_intent", "")
+		payment_record.order_id = args.get("session_id", "")
+	
+	# Common fields for successful payments
+	if status == "Completed" or status == "Captured":
+		payment_record.student = args.get("student", "")
 		payment_record.mobile = args.get("mobile_number", "")
 		payment_record.email = args.get("email", "")
 		payment_record.address_line_1 = args.get("address_line_1", "")
@@ -87,58 +131,72 @@ def create_razorpay_payment_record(args, status):
 		payment_record.state = args.get("state", "")
 		payment_record.country = args.get("country", "")
 		payment_record.pincode = args.get("pincode", "")
-	if status == "Failed":
-		payment_record.failure_description = args.get("description", "")
+	elif status == "Failed":
+		payment_record.failure_description = args.get("description", "") or args.get("error", {}).get("message", "")
+	
 	payment_record.save(ignore_permissions=True)
 	return payment_record
 
 
 @frappe.whitelist()
 def handle_payment_success(response, against_invoice, billing_details):
-	if frappe.db.exists(
-		"Payment Record",
-		{
-			"order_id": response["razorpay_order_id"],
-			"payment_id": response["razorpay_payment_id"],
-			"status": "Captured",
-		},
-	):
-		return
-
-	client = get_client()
-	client.utility.verify_payment_signature(response)
+	if not response:
+		frappe.throw(_("Invalid payment response"))
+	
+	gateway_name = get_payment_gateway()
+	client = get_gateway_client(gateway_name)
+	
+	# Verify payment signature if the gateway supports it
+	if hasattr(client, 'verify_payment_signature'):
+		client.utility.verify_payment_signature(response)
+	
 	payment_details = get_details(against_invoice)
-
-	payment_record = create_razorpay_payment_record(
-		{**response, **billing_details, **payment_details}, "Captured"
+	
+	payment_record = create_payment_record(
+		{**response, **billing_details, **payment_details}, 
+		"Completed",
+		gateway_name
 	)
-
+	
 	try:
 		frappe.flags.ignore_account_permission = True
 		pe = get_payment_entry("Sales Invoice", against_invoice)
-		pe.reference_no = response["razorpay_order_id"]
+		pe.reference_no = response.get("razorpay_order_id") or response.get("payment_id") or response.get("id")
 		pe.reference_date = nowdate()
 		pe.posting_date = nowdate()
 		pe.save(ignore_permissions=True)
 		pe.submit()
-
+	
 	except Exception as e:
 		frappe.throw(_("Error during payment: {0}").format(e))
 
 
 @frappe.whitelist()
 def handle_payment_failure(response, against_invoice, billing_details):
-
-	response = response["error"]
-	razorpay_date = {
-		"description": response.get("description"),
-		"razorpay_order_id": response["metadata"].get("order_id"),
-		"razorpay_payment_id": response["metadata"].get("payment_id"),
-	}
-	client = get_client()
-
+	if not response:
+		frappe.throw(_("Invalid payment response"))
+	
+	gateway_name = get_payment_gateway()
 	payment_details = get_details(against_invoice)
-
-	payment_record = create_razorpay_payment_record(
-		{**razorpay_date, **billing_details, **payment_details}, "Failed"
-	)
+	
+	# Extract error details based on gateway
+	error_details = {}
+	if gateway_name == "Razorpay":
+		error_details = response.get("error", {})
+		razorpay_data = {
+			"description": error_details.get("description"),
+			"razorpay_order_id": response.get("metadata", {}).get("order_id"),
+			"razorpay_payment_id": response.get("metadata", {}).get("payment_id"),
+		}
+		payment_record = create_payment_record(
+			{**razorpay_data, **billing_details, **payment_details, **error_details}, 
+			"Failed",
+			gateway_name
+		)
+	else:
+		# Generic handling for other gateways
+		payment_record = create_payment_record(
+			{**response, **billing_details, **payment_details}, 
+			"Failed",
+			gateway_name
+		)

@@ -24,6 +24,8 @@
   "instructor_created_by",
   "portal_settings_tab",
   "attendance_based_on_course_schedule",
+  "payment_gateway",
+  "payment_gateway_section",
   "razorpay_key",
   "razorpay_secret",
   "column_break_atxc",
@@ -111,30 +113,30 @@
    "fieldtype": "Check",
    "label": "Attendance Based on Course Schedule"
   },
-   {
-      "fieldname": "payment_gateway",
-      "fieldtype": "Select",
-      "label": "Payment Gateway",
-      "options": "Razorpay\nPayPal\nStripe\nPayTM",
-      "default": "Razorpay"
-   },
-   {
-      "fieldname": "payment_gateway_section",
-      "fieldtype": "Section Break",
-      "label": "Payment Gateway Settings"
-   },
-   {
-      "fieldname": "razorpay_key",
-      "fieldtype": "Data",
-      "label": "Razorpay Key",
-      "depends_on": "eval: doc.payment_gateway == 'Razorpay'"
-   },
-   {
-      "fieldname": "razorpay_secret",
-      "fieldtype": "Password",
-      "label": "Razorpay Secret",
-      "depends_on": "eval: doc.payment_gateway == 'Razorpay'"
-   },
+  {
+   "fieldname": "payment_gateway",
+   "fieldtype": "Select",
+   "label": "Payment Gateway",
+   "options": "Razorpay\nPayPal\nStripe\nPayTM",
+   "default": "Razorpay"
+  },
+  {
+   "fieldname": "payment_gateway_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Gateway Settings"
+  },
+  {
+   "fieldname": "razorpay_key",
+   "fieldtype": "Data",
+   "label": "Razorpay Key",
+   "depends_on": "eval: doc.payment_gateway == 'Razorpay'"
+  },
+  {
+   "fieldname": "razorpay_secret",
+   "fieldtype": "Password",
+   "label": "Razorpay Secret",
+   "depends_on": "eval: doc.payment_gateway == 'Razorpay'"
+  },
   {
    "fieldname": "column_break_atxc",
    "fieldtype": "Column Break"
